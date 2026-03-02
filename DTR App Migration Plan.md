@@ -137,9 +137,9 @@ Resources:
       LaunchTemplate:
         LaunchTemplateId: !Ref DTRLaunchTemplate
         Version: !GetAtt DTRLaunchTemplate.LatestVersionNumber
-      MinSize: '2'      # Always have at least 2 for redundancy
-      MaxSize: '6'      # Enough overhead for the 3-day peak
-      DesiredCapacity: '2'
+      MinSize: '1'      # Always have at least 2 for redundancy
+      MaxSize: '3'      # Enough overhead for the 3-day peak
+      DesiredCapacity: '1'
       TargetGroupARNs:
         - !Ref DTRTargetGroup
 
@@ -152,7 +152,7 @@ Resources:
       TargetTrackingConfiguration:
         PredefinedMetricSpecification:
           PredefinedMetricType: ASGAverageCPUUtilization
-        TargetValue: 50.0 # Scale earlier (at 50%) to ensure DTR remains snappy
+        TargetValue: 70.0 # Scale earlier (at 70%) to ensure DTR remains snappy
 
 Outputs:
   AppURL:
