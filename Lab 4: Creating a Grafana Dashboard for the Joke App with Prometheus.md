@@ -1,4 +1,4 @@
-# Lab 5: Creating a Grafana Dashboard for the Joke App with Prometheus
+# Lab 4: Creating a Grafana Dashboard for the Joke App with Prometheus
 
 Welcome to Lab 4 of the SRE Workshop! This hands-on activity builds on previous labs by adding Grafana to visualize metrics from our funny Joke API monitored by Prometheus. You'll deploy Grafana alongside the existing setup, create a dashboard to display key metrics (like request rates, latency, and custom joke stats), and explore visualization options. This helps turn raw data into actionable insights—e.g., see when "bad jokes" (failures) spike!
 
