@@ -16,8 +16,7 @@ This guide is designed for beginners. Each step includes explanations, why we're
 
 1. In your terminal, create a new directory and copy files from Lab 3 (or earlier):  
    ```
-   mkdir sre-lab4
-   cp -r ../sre-lab4/* sre-lab5/
+   mkdir sre-lab5
    cd sre-lab5
    ```
 
