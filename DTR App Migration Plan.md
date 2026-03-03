@@ -1,162 +1,209 @@
-# Critical DTR App Migration Plan
+# Critical DTR App Migration POC
 
-## Overview
-This plan migrates a monolithic DTR application to a highly available, decoupled architecture. 
-The goal is 99.9% uptime and zero data loss during the high-traffic first 3 days of the month.
+# Docker + EC2 + Auto Scaling + ALB Lab (Using Docker Hub - Option B)
 
-## Step 1: Database Extraction (The "Point of No Return")
-Since DTR data is sensitive, we must ensure no data is lost during the move:
-1. Stop the application on the current `c6i.xlarge` to freeze the database state.
-2. Perform a full backup: `pg_dump -h localhost -U [user] [db_name] > dtr_prod_backup.sql`.
-3. Import this into the new RDS instance created by the CloudFormation template below.
+## 🎯 Objective
 
-## Step 2: Health Check Configuration
-DTR apps must be responsive. Ensure your Docker container has a `/health` route that:
-- Returns a `200 OK` status.
-- Validates the connection to the database.
-- The ALB will use this to determine if an instance is "healthy" before sending traffic.
+In this lab, you will:
 
-## Step 3: Deployment Strategy
-1. Deploy the CloudFormation stack.
-2. Update your `UserData` in the template to include your DB connection strings.
-3. Point your DNS (e.g., `dtr.clientdomain.com`) to the ALB DNS name.
+-   Deploy a Dockerized app to EC2
+-   Use Docker Hub as the image repository
+-   Attach EC2 to an Auto Scaling Group (ASG)
+-   Place it behind an Application Load Balancer (ALB)
+-   Stress test the application
+-   Deploy a new version using `latest` tag
+-   Trigger instance refresh for rolling update
 
-Cloudformation template > Save this as <filename>.yaml
+------------------------------------------------------------------------
 
+# 🏗 Architecture Overview
+
+Internet → ALB → Target Group → Auto Scaling Group → EC2 (Docker running
+app)
+
+Scaling Trigger: CPU Utilization (Target Tracking 50%)
+
+------------------------------------------------------------------------
+
+# 🧑‍💻 Step 1: Create Simple App
+
+## app.js
+
+``` javascript
+const express = require('express');
+const os = require('os');
+const app = express();
+
+const VERSION = process.env.VERSION || "v1";
+
+app.get('/', (req, res) => {
+    res.send(`
+        <h1>App Version: ${VERSION}</h1>
+        <p>Hostname: ${os.hostname()}</p>
+    `);
+});
+
+app.listen(8080, () => console.log("Running on 8080"));
 ```
-AWSTemplateFormatVersion: '2010-09-09'
-Description: 'High-Availability Stack for Critical DTR Application'
 
-Parameters:
-  VpcId:
-    Type: AWS::EC2::VPC::Id
-  Subnets:
-    Type: List<AWS::EC2::Subnet::Id>
-    Description: Select at least two subnets in DIFFERENT Availability Zones.
-  DBPassword:
-    NoEcho: true
-    Type: String
-    Description: Master password for RDS.
+------------------------------------------------------------------------
 
-Resources:
-  # --- SECURITY GROUPS ---
-  ALBSG:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Public HTTP access
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
+## Dockerfile
 
-  AppSG:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: App access from ALB
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          SourceSecurityGroupId: !GetAtt ALBSG.GroupId
-
-  DBSG:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: DB access from App
-      VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 5432
-          ToPort: 5432
-          SourceSecurityGroupId: !GetAtt AppSG.GroupId
-
-  # --- DATABASE (HIGH AVAILABILITY) ---
-  DTRDatabase:
-    Type: AWS::RDS::DBInstance
-    Properties:
-      DBInstanceClass: db.t3.medium
-      Engine: postgres
-      AllocatedStorage: '50' # Increased for DTR logs
-      MasterUsername: dtr_admin
-      MasterUserPassword: !Ref DBPassword
-      MultiAZ: true  # CRITICAL: Ensures DB survives an AZ failure
-      VPCSecurityGroups:
-        - !GetAtt DBSG.GroupId
-      BackupRetentionPeriod: 7
-      StorageType: gp3
-
-  # --- COMPUTE TIER (ALB + ASG) ---
-  DTRLoadBalancer:
-    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties:
-      Subnets: !Ref Subnets
-      SecurityGroups:
-        - !GetAtt ALBSG.GroupId
-
-  DTRTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      VpcId: !Ref VpcId
-      Port: 80
-      Protocol: HTTP
-      HealthCheckPath: /health
-      HealthCheckIntervalSeconds: 30
-
-  DTRListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      LoadBalancerArn: !Ref DTRLoadBalancer
-      Port: 80
-      Protocol: HTTP
-      DefaultActions:
-        - Type: forward
-          TargetGroupArn: !Ref DTRTargetGroup
-
-  # Launch Template - NO SPOT INSTANCES
-  DTRLaunchTemplate:
-    Type: AWS::EC2::LaunchTemplate
-    Properties:
-      LaunchTemplateData:
-        InstanceType: c6i.large
-        ImageId: ami-0c55b159cbfafe1f0 # Update to your specific AMI
-        SecurityGroupIds:
-          - !GetAtt AppSG.GroupId
-        UserData:
-          Fn::Base64: !Sub |
-            #!/bin/bash
-            # Commands to pull and start your Docker DTR app
-            # docker run -e DB_URL=${DTRDatabase.Endpoint.Address} -p 80:80 dtr-app:latest
-
-  DTRASG:
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Properties:
-      VPCZoneIdentifier: !Ref Subnets
-      LaunchTemplate:
-        LaunchTemplateId: !Ref DTRLaunchTemplate
-        Version: !GetAtt DTRLaunchTemplate.LatestVersionNumber
-      MinSize: '1'      # Always have at least 2 for redundancy
-      MaxSize: '3'      # Enough overhead for the 3-day peak
-      DesiredCapacity: '1'
-      TargetGroupARNs:
-        - !Ref DTRTargetGroup
-
-  # Conservative Scaling Policy for DTR Stability
-  DTRScalingPolicy:
-    Type: AWS::AutoScaling::ScalingPolicy
-    Properties:
-      AutoScalingGroupName: !Ref DTRASG
-      PolicyType: TargetTrackingScaling
-      TargetTrackingConfiguration:
-        PredefinedMetricSpecification:
-          PredefinedMetricType: ASGAverageCPUUtilization
-        TargetValue: 70.0 # Scale earlier (at 70%) to ensure DTR remains snappy
-
-Outputs:
-  AppURL:
-    Value: !GetAtt DTRLoadBalancer.DNSName
-  DBHost:
-    Value: !GetAtt DTRDatabase.Endpoint.Address
+``` dockerfile
+FROM node:18
+WORKDIR /app
+COPY . .
+RUN npm install express
+EXPOSE 8080
+CMD ["node", "app.js"]
 ```
+
+------------------------------------------------------------------------
+
+# 🐳 Step 2: Build & Push to Docker Hub
+
+``` bash
+docker login
+
+docker build -t yourdockerhubusername/docker-asg-demo:latest .
+
+docker push yourdockerhubusername/docker-asg-demo:latest
+```
+
+------------------------------------------------------------------------
+
+# 🖥 Step 3: Create Launch Template
+
+User Data Script:
+
+``` bash
+#!/bin/bash
+yum update -y
+yum install -y docker
+service docker start
+
+docker pull yourdockerhubusername/docker-asg-demo:latest
+
+docker run -d -p 80:8080 -e VERSION=v1 --name demo yourdockerhubusername/docker-asg-demo:latest
+```
+
+------------------------------------------------------------------------
+
+# ⚖ Step 4: Create Application Load Balancer
+
+-   Internet-facing
+-   Listener: HTTP 80
+-   Target Group:
+    -   Target type: Instance
+    -   Port: 80
+    -   Health check path: /
+
+Attach ASG to Target Group.
+
+------------------------------------------------------------------------
+
+# 📈 Step 5: Create Auto Scaling Group
+
+Settings:
+
+-   Min: 1
+-   Desired: 1
+-   Max: 4
+-   Scaling Policy:
+    -   Target Tracking
+    -   CPU Utilization: 50%
+
+------------------------------------------------------------------------
+
+# 🔥 Step 6: Verify Application
+
+Open ALB DNS.
+
+Expected output:
+
+App Version: v1\
+Hostname: ip-xxx-xxx-xxx
+
+Refresh multiple times to observe hostname changes after scaling.
+
+------------------------------------------------------------------------
+
+# 💥 Step 7: Stress Test
+
+From your machine:
+
+``` bash
+ab -n 10000 -c 200 http://<alb-dns>/
+```
+
+Observe:
+
+-   CPU spike
+-   ASG launches new instances
+-   Multiple hostnames appear
+
+------------------------------------------------------------------------
+
+# 🚀 Step 8: Deploy New Version
+
+Modify app.js:
+
+``` javascript
+const VERSION = process.env.VERSION || "v2";
+```
+
+Rebuild and push:
+
+``` bash
+docker build -t yourdockerhubusername/docker-asg-demo:latest .
+docker push yourdockerhubusername/docker-asg-demo:latest
+```
+
+------------------------------------------------------------------------
+
+# 🔄 Step 9: Trigger Rolling Update
+
+Run:
+
+``` bash
+aws autoscaling start-instance-refresh   --auto-scaling-group-name docker-asg-demo-asg
+```
+
+Instances will rotate gradually.
+
+Verify ALB now shows:
+
+App Version: v2
+
+------------------------------------------------------------------------
+
+# 🧠 Key Concepts Learned
+
+-   Immutable Infrastructure
+-   Stateless Application Design
+-   Horizontal Scaling
+-   Rolling Deployment via Instance Refresh
+-   ALB Health Checks
+-   Target Tracking Scaling Policy
+
+------------------------------------------------------------------------
+
+# ⚠ Important Note
+
+Using `latest` tag is acceptable for lab/demo purposes.
+
+For production: - Use versioned tags - Update Launch Template
+dynamically - Avoid mutable image references
+
+------------------------------------------------------------------------
+
+# 🎉 Lab Complete
+
+You have successfully:
+
+-   Deployed containerized app on EC2
+-   Implemented Auto Scaling
+-   Configured Load Balancing
+-   Performed stress testing
+-   Executed rolling deployment
